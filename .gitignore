@@ -1,8 +1,9 @@
-**/bin/**
-**/include/**
-**/lib/**
-**/lib64/**
+bin/**
+include/**
+lib/**
+lib64/**
 pyvenv.cfg
 config.h
-**/.env
+.env
 mosquitto/
+tests/

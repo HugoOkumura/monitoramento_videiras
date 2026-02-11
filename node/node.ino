@@ -4,6 +4,8 @@
 
 #include "config.h"
 
+#define SENSORID 1
+
 #define DHT_PIN 23
 #define MSG_SIZE 50
 #define READING_BUFFER_SIZE 10
@@ -118,6 +120,7 @@ void sendMSG(){
   humMed  = humSum  / float(count);
 
   String payload = "{";
+  payload += "\"sensor_id\":" + String(SENSORID) + ",";
   payload += "\"temperatura\":" + String(tempMed) + ",";
   payload += "\"umidade\":" + String(humMed);
   payload += "}";
