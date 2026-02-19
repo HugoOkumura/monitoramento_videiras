@@ -7,15 +7,8 @@ services:
       - "9001:9001"
     volumes:
       - ./mosquitto/config/mosquitto.conf:/mosquitto/config/mosquitto.conf
-  
-  # consumer_tst:
-  #   build: ./consumer
-  #   container_name: consumer_test
-  #   depends_on:
-  #     - mosquitto
-  #   environment:
-  #     - PYTHONUNBUFFERED=1
-  #   restart: always
+    networks:
+      - kafka-network
 
   ingestor:
     build: ./ingestor
@@ -31,7 +24,32 @@ services:
       - KAFKA_TOPIC=uva_mesa_vitoria
     restart: always
     volumes:
-      - ./ingestor/log/log.log:./ingestor/log/log.log
+      - .:/usr/src/app/
+      - ./ingestor/log/log.log:/usr/src/app/log/log.log
+    networks:
+      - kafka-network
+
+  preprocessor:
+    build: ./pre_processor
+    container_name: pre_processor
+    depends_on:
+      - kafka
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - KAFKA_TOPIC=uva_mesa_vitoria
+      - KAFKA_GROUP_ID=data-processing-group
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=token
+      - INFLUXDB_ORG=vinhedo
+      - INFLUXDB_BUCKET=sensor_data
+      - POSTGRES_HOST=postgres 
+      - POSTGRES_DB=leituras_vinhedo
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=admin
+      - AGREGAR_MINUTOS=15
+    volumes:
+      - .:/usr/src/app/
+      - ./pre_processor/log/log.log:/usr/src/app/log/log.log
     networks:
       - kafka-network
 
@@ -72,7 +90,35 @@ services:
     networks:
       - kafka-network
 
+  influxDB:
+    image: influxdb:3-core-dev
+    ports:
+      -"8086":"8086"
+    environment:
+      - INFLUXDB_INIT_MODE= setup
+      - INFLUXDB_INIT_USERNAME=admin
+      - INFLUXDB_INIT_PASSWORD=admin
+      - INFLUXDB_INIT_ORG=vinhedo
+      - INFLUXDB_INIT_BUCKET=sensor_data
+      - INFLUXDB_INIT_ADMIN_TOKEN=token
+    volumes:
+      - influxdb-data:/var/lib/influxdb3
+
+  postgres:
+    image: postgres:18.2
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=admin
+      - POSTGRES_DB=leituras_vinhedo
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
 
 networks:
   kafka-network:
     driver: bridge
+
+volumes:
+  influxdb-data:
+  postgres-data:
