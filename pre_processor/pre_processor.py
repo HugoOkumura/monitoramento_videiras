@@ -1,17 +1,15 @@
-import os
+from pyflink.datastream import StreamExecutionEnvironment
+from pyflink.datastream.connectors.kafka import KafkaSource, KafkaSink, FlinkKafkaConsumer
+from pyflink.common.serialization import SimpleStringSchema
+from pyflink.common import WatermarkStrategy, Time
+from pyflink.datastream.window import TumblingEventTimeWindows
 import json
-import threading
-import time
 import logging
-import queue
-import numpy as np
-from typing import Dict, Any
 from datetime import datetime
-from confluent_kafka import Consumer, KafkaException
+from influxdb_client import InfluxDBClient, Point
+from influxdb_client.client.write_api import SYNCHRONOUS
+import os 
 
-from kafka_consumer import KafkaConsumer
-from agregador import Agregador
-from influxdb_writer import InfluxDBWriter
 
 def startLog():
     logging.basicConfig(
@@ -24,111 +22,138 @@ def startLog():
         filemode="a"
     )
 
+class VineyardDataProcessor:
 
-class PreProcessor():
     def __init__(self):
-        #Kafka config
-        kafka_config = {
-            'boostrap_servers': os.getenv('KAFKA_BOOTSTRAP_SERVERS'),
-            'kafka_topic': os.getenv('KAFKA_TOPIC'),
-            'kafka_group_id': os.getenv('KAFKA_GROUP_ID'),
-        }
-        self.kafka_consumer = KafkaConsumer(kafka_config, self.kafka_message_callback)
+        self.KAFKA_BOOTSRAP_SERVERS  = os.getenv('KAFKA_BOOTSRAP_SERVERS')
+        self.KAFKA_TOPIC = os.getenv('KAFKA_TOPIC')
 
-        #InfluxDB config
-        self.influxdb = InfluxDBWriter(
-            url=os.getenv('INFLUXDB_URL'),
-            token=os.getenv('INFLUXDB_TOKEN'),
-            org=os.getenv('INFLUXDB_ORG'),
-            bucket=os.getenv('INFLUXDB_BUCKET')
+        self.kafka_consumer = FlinkKafkaConsumer(
+            topics=self.KAFKA_TOPIC,
+            deserialization_schema=SimpleStringSchema(),
+            properties={
+                "bootstrap.servers": self.KAFKA_BOOTSRAP_SERVERS,
+                "group.id": "uva_vitoria_processor_group"
+            }
         )
 
-        #agregador por período de tempo
-        self.agregador = Agregador()
-        self.lock = threading.Lock()
+        self.flink_env = StreamExecutionEnvironment.get_execution_environment()
+        self.flink_env.set_parallelism(1)
+        self.stream = self.flink_env.add_source(self.kafka_consumer)
 
-        #Thread de processamento
-        self.janela_tempo = os.getenv('AGREGAR_MINUTOS')
-        self.lote_timer = threading.Timer(60*self.janela_tempo, self._processamento_lote)
-        self.running = False
+        self.influx_config = {
+            "url": os.getenv('INFLUXDB_URL'),
+            "token": os.getenv('INFLUXDB_TOKEN'),
+            "org": os.getenv('INFLUXDB_ORG'),
+            "bucket": os.getenv('INFLUXDB_BUCKET')
+        }
+
+        self.postgres_config = {
+            "host": os.getenv('POSTGRES_HOST'),
+            "port": os.getenv('POSTGRES_PORT'),
+            "database": os.getenv('POSTGRES_DB'),
+            "user": os.getenv('POSTGRES_USER'),
+            "password": os.getenv('POSTGRES_PASSWORD')
+        }
+
+    def process_sensor_data(self, data):
+        
+        sensor_data = json.loads(data)
+
+        results = {
+            'sensor_id': sensor_data['sensor_id'],
+            'timestamp': sensor_data['timestamp'],
+            'temperature': sensor_data['temperature'],
+            'humidity': sensor_data['humidity'],
+            'soil_moisture': sensor_data['soil_moisture']
+        }
+
+        results['water_stress'] = self.calculate_water_stress(sensor_data)
+        results['disease_risk'] = self.calculate_disease_risk(sensor_data)
+
+        return results
+    
+    def calculate_water_stress(self, data):
+        return 0
+    
+    def calculate_disease_risk(self, data):
+        return 0
+    
+    def aggregate_field_data(self,sensor_results):
+        if not sensor_results:
+            return None
+        
+        temps = [r['temperature'] for r in sensor_results]
+
+        return{
+            'timestamp': datetime.now().isoformat(),
+            'avg_temperature': sum(temps) / len(temps),
+            'max_temperature': max(temps),
+            'min_temperature': min(temps),
+            'avg_water_stress': sum(r['water_stress'] for r in sensor_results) / len(sensor_results),
+            'avg_disease_risk': sum(r['disease_risk'] for r in sensor_results) / len(sensor_results),
+            'active_sensors': len(sensor_results)
+        }
+    
+    def save_to_influxdb(self, data):
+        with InfluxDBClient(**self.influx_config) as client:
+            write_api = client.write_api(write_options=SYNCHRONOUS)
+
+            if 'sensor_id' in data:
+                point = Point("sensor_data") \
+                    .tag("sensor_id", data['sensor_id']) \
+                    .field("temperature", data['temperature']) \
+                    .field("humidity", data['humidity']) \
+                    .field("soil_moisture", data['soil_moisture']) \
+                    .field("water_stress", data['water_stress']) \
+                    .field("disease_risk", data['disease_risk']) \
+                    .time(data['timestamp'])
+            else:
+                point = Point("field_aggregate") \
+                    .field("avg_temperature", data['avg_temperature']) \
+                    .field("max_temperature", data['max_temperature']) \
+                    .field("min_temperature", data['min_temperature']) \
+                    .field("avg_water_stress", data['avg_water_stress']) \
+                    .field("avg_disease_risk", data['avg_disease_risk']) \
+                    .field("active_sensors", data['active_sensors']) \
+                    .time(data['timestamp'])
+                
+            write_api.write(bucket=self.influx_config['bucket'], org=self.influx_config['org'], record=point)
+
+
+    def save_to_postgres(self, data):
+        pass
 
     def run(self):
-        self.running = True
-
-        self.lote_timer.start()
         
-        try:
-            self.kafka_consumer.run()
-        except Exception as e:
-            logging.info(f"PreProcessor/ru: {e}")
+        # processamento individual por sensor
+        sensor_stream = self.stream \
+            .map(self.process_sensor_data) \
+            .key_by(lambda x: x['sensor_id'])
+        
+        # Calcular estatísticas por sensor em janelas de 1 minuto
+        sensor_stats = sensor_stream \
+            .window(TumblingEventTimeWindows.of(Time.minutes(1))) \
+            .reduce(lambda a, b: {
+                'sensor_id': a['sensor_id'],
+                'min_temp': min(a['temperature'], b['temperature']),
+                'max_temp': max(a['temperature'], b['temperature']),
+                'avg_temp': (a['temperature'] + b['temperature']) / 2,
+                'avg_water_stress': (a['water_stress'] + b['water_stress']) / 2
+            })
+        
+        self.stream.map(lambda x: self.save_to_influxdb(x))
+        self.stream.map(lambda x: self.save_to_postgres(x))
 
-    
-    def kafka_message_callback(self, message: Dict[str: Any]):
-        try:
-            logging.info(f"Mensagem recebida")
-            self.agregador.add_leitura(message)
-        except Exception as e:
-            logging.error(f"PreProcessor/kafka_message_callback:{e}")
+        field_aggregate = self.stream \
+            .window_all(TumblingEventTimeWindows.of(Time.minutes(5))) \
+            .reduce(lambda a, b: self.aggregate_field_data([a, b]))
 
-    def _processamento_lote(self):
-        '''
-        1.  Calcula temperatura média, mínima e máxima dentro do período de tempo,
-            o cálculo é feito por cada sensor individual
-        2.  Adiciona a média geral dos valores lidos no vinhedo
-        3.  Adiciona os dados do lote com dados vindo de satélites (to-do)
-        '''
-        try:
-            with self.lock:
-                lote: Dict[str, Any] = self.agregador.get_lote()
+        field_aggregate.map(lambda x: self.save_to_influxdb(x))
 
-                for key in lote.keys():
-                    leituras = lote[key]
-
-                    temperatura_media = np.mean([x['temperatura'] for x in leituras])
-                    umidade_media = np.mean([x['umidade'] for x in leituras])
-
-                    riscos = self.verifica_risco_doenca(temperatura_media,umidade_media)
-                    
-                    pre_process_data = {
-                        "sensor_id" : key,
-                        "temperatura_media": temperatura_media,
-                        "temperatura_min": np.min([x['temperatura'] for x in leituras]),
-                        "temperatura_max": np.max([x['temperatura'] for x in leituras]),
-                        "umidade_media": umidade_media,
-                        "riscos": riscos,   
-                        #...
-                        "pre_process_timestamp": datetime.now().isoformat()
-                    }   
-
-            #obtém lote por períodos de tempo (ex: de cada 5/10/15/etc minutos) - definir talvez por uma variavel de ambiente
-        except Exception as e:
-            logging.error(f"PreProcessor/__processamento_lote: {e}")
-            time.sleep(5)
-
-        def verifica_risco_doenca(temperatura_media, umidade_media):
-            riscos = []
-            #míldio
-            #to-do: adicionar tempo de chuva, presença de chuva, etc
-            if temperatura_media in range(18,22) and umidade_media > 75:
-                riscos.append({"míldio": "alto"})
-            else:
-                riscos.append({"míldio": "baixo"})
-
-            #oídio
-            if temperatura_media in range(20,30) and umidade_media < 50:
-                riscos.append({"oídio": "alto"})
-            else:
-                riscos.append({"oídio": "baixo"})
-
-            return riscos
+        self.flink_env.execute("Vineyard Data Processing Job")
 
 if __name__ == "__main__":
-    os.makedirs("./log", exist_ok=True)
-    open("./log/log.log","a+").close()
     startLog()
-    try:
-        pass
-        # ingest = DataIngestor()
-        # ingest.run()
-    except Exception as e:
-        logging.error(e)
+    processor = VineyardDataProcessor()
+    processor.run()
