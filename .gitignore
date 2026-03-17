@@ -9,3 +9,4 @@ config.h
 mosquitto/
 tests/
 **/log/**
+grafana/

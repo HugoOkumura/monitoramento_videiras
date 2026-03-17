@@ -7,11 +7,15 @@ services:
       - "9001:9001"
     volumes:
       - ./mosquitto/config/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
     networks:
-      - kafka-network
+      - vineyard-network
 
   ingestor:
-    build: ./ingestor
+    build: 
+      context: .
+      dockerfile: ./ingestor/Dockerfile
     container_name: data_ingestor
     depends_on:
       - mosquitto
@@ -27,13 +31,13 @@ services:
       - .:/usr/src/app/
       - ./ingestor/log/log.log:/usr/src/app/log/log.log
     networks:
-      - kafka-network
+      - vineyard-network
 
   preprocessor:
-    build: ./pre_processor
+    build: 
+      context: .
+      dockerfile: ./pre_processor/Dockerfile
     container_name: pre_processor
-    depends_on:
-      - kafka
     environment:
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
       - KAFKA_TOPIC=uva_mesa_vitoria
@@ -47,11 +51,16 @@ services:
       - POSTGRES_USER=admin
       - POSTGRES_PASSWORD=admin
       - AGREGAR_MINUTOS=15
+    depends_on:
+      - kafka
+      - flink-jobmanager
+      - influxdb
+      - postgres
     volumes:
       - .:/usr/src/app/
       - ./pre_processor/log/log.log:/usr/src/app/log/log.log
     networks:
-      - kafka-network
+      - vineyard-network
 
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
@@ -63,7 +72,7 @@ services:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
     networks:
-      - kafka-network
+      - vineyard-network
 
   # Kafka Broker
   kafka:
@@ -88,13 +97,38 @@ services:
       KAFKA_JMX_PORT: 9101
       KAFKA_JMX_HOSTNAME: localhost
     networks:
-      - kafka-network
+      - vineyard-network
 
-  influxDB:
-    image: influxdb:3-core-dev
+  flink-jobmanager:
+    image: flink:2.2.0-scala_2.12-java11
     ports:
-      -"8086":"8086"
+      - "8081:8081"
+    command: jobmanager
     environment:
+      - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
+    networks:
+      - vineyard-network
+
+  flink-taskmanager:
+    image: flink:2.2.0-scala_2.12-java11
+    command: taskmanager
+    environment:
+      - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
+      - TASK_MANAGER_NUMBER_OF_TASK_SLOTS=2
+    depends_on:
+      - flink-jobmanager
+    networks:
+      - vineyard-network
+
+  influxdb:
+    image: influxdb:3-core
+    ports:
+      - "8086:8086"
+    command: >
+      --node-id-from-env INFLUXDB_ID
+      --log-filter info
+    environment:
+      - INFLUXDB_ID=vinhedo
       - INFLUXDB_INIT_MODE= setup
       - INFLUXDB_INIT_USERNAME=admin
       - INFLUXDB_INIT_PASSWORD=admin
@@ -103,6 +137,8 @@ services:
       - INFLUXDB_INIT_ADMIN_TOKEN=token
     volumes:
       - influxdb-data:/var/lib/influxdb3
+    networks:
+      - vineyard-network
 
   postgres:
     image: postgres:18.2
@@ -112,11 +148,30 @@ services:
       - POSTGRES_USER=admin
       - POSTGRES_PASSWORD=admin
       - POSTGRES_DB=leituras_vinhedo
+    networks:
+      - vineyard-network
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - postgres-data:/var/lib/postgresql
+      - .postgres/init-scripts:/docker-entrypoint-initdb.d:ro
+
+
+  grafana:
+    image: grafana/grafana:12.2
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - ./grafana/grafana_storage:/var/lib/grafana
+    depends_on:
+      - influxdb
+      - postgres
+    networks:
+      - vineyard-network
 
 networks:
-  kafka-network:
+  vineyard-network:
     driver: bridge
 
 volumes:
