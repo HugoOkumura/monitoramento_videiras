@@ -93,11 +93,12 @@ services:
   influxDB:
     image: influxdb:3-core-dev
     ports:
-      -"8086":"8086"
+      - "8086:8086"
     environment:
       - INFLUXDB_INIT_MODE= setup
       - INFLUXDB_INIT_USERNAME=admin
       - INFLUXDB_INIT_PASSWORD=admin
+      - INFLUXDB3_ENTERPRISE_LICENSE_EMAIL=youremail@youremail
       - INFLUXDB_INIT_ORG=vinhedo
       - INFLUXDB_INIT_BUCKET=sensor_data
       - INFLUXDB_INIT_ADMIN_TOKEN=token
