@@ -10,7 +10,6 @@ from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
 import os 
 
-
 def startLog():
     logging.basicConfig(
         level=logging.INFO,
@@ -25,21 +24,36 @@ def startLog():
 class VineyardDataProcessor:
 
     def __init__(self):
-        self.KAFKA_BOOTSRAP_SERVERS  = os.getenv('KAFKA_BOOTSRAP_SERVERS')
-        self.KAFKA_TOPIC = os.getenv('KAFKA_TOPIC')
+        self.KAFKA_BOOTSTRAP_SERVERS  = os.getenv('KAFKA_BOOTSTRAP_SERVERS')
+        self.KAFKA_TOPIC = os.getenv('KAFKA_TOPIC') 
+        
+        self.flink_env = StreamExecutionEnvironment.get_execution_environment()
+        self.flink_env.add_jars("file:///opt/flink/lib/flink-sql-connector-kafka-3.0.1-1.18.jar")
 
-        self.kafka_consumer = FlinkKafkaConsumer(
-            topics=self.KAFKA_TOPIC,
-            deserialization_schema=SimpleStringSchema(),
-            properties={
-                "bootstrap.servers": self.KAFKA_BOOTSRAP_SERVERS,
-                "group.id": "uva_vitoria_processor_group"
-            }
+        # self.kafka_consumer = FlinkKafkaConsumer(
+        #     topics=self.KAFKA_TOPIC,
+        #     deserialization_schema=SimpleStringSchema(),
+        #     properties={
+        #         "bootstrap.servers": self.KAFKA_BOOTSTRAP_SERVERS,
+        #         "group.id": os.getenv('KAFKA_GROUP_ID'),
+        #     }
+        # )
+
+        self.kafka_source = KafkaSource.builder() \
+            .set_bootstrap_servers(self.KAFKA_BOOTSTRAP_SERVERS) \
+            .set_topics(self.KAFKA_TOPIC) \
+            .set_group_id(os.getenv('KAFKA_GROUP_ID')) \
+            .set_value_only_deserializer(SimpleStringSchema()) \
+            .build()
+        
+        self.stream = self.flink_env.from_source(
+            self.kafka_source,
+            WatermarkStrategy.no_watermarks(),
+            "Kafka Source"
         )
 
-        self.flink_env = StreamExecutionEnvironment.get_execution_environment()
-        self.flink_env.set_parallelism(1)
-        self.stream = self.flink_env.add_source(self.kafka_consumer)
+        # self.flink_env.set_parallelism(1)
+        # self.stream = self.flink_env.add_source(self.kafka_source)
 
         self.influx_config = {
             "url": os.getenv('INFLUXDB_URL'),
@@ -155,5 +169,9 @@ class VineyardDataProcessor:
 
 if __name__ == "__main__":
     startLog()
+    
+    # while True:
+    #     pass
+
     processor = VineyardDataProcessor()
     processor.run()

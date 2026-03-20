@@ -105,7 +105,7 @@ class DataIngestor:
  
         except ValidationError as e:
             logging.error(f"_on_message: invalid data {e}")
-        except Exception as e:
+        except BaseException as e:
             logging.error(f"_on_message: {e}:\n{msg.payload.decode()}")
 
     def _producer_send_report(self, err, msg):

@@ -29,7 +29,7 @@ services:
     restart: always
     volumes:
       - ./models:/usr/src/app/models
-      - ./ingestor/log/:/usr/src/app/log/
+      - ./ingestor/log/log.log:/usr/src/app/log/log.log
     networks:
       - vineyard-network
 
@@ -57,6 +57,7 @@ services:
       - influxdb
       - postgres
     volumes:
+      - ./jars/flink-sql-connector-kafka-3.0.1-1.18.jar:/opt/flink/lib/flink-sql-connector-kafka-3.0.1-1.18.jar
       - ./models:/usr/src/app/models
       - ./pre_processor/log/log.log:/usr/src/app/log/log.log
     networks:
@@ -84,6 +85,7 @@ services:
     ports:
       - "9092:9092"
       - "9101:9101"
+      - "29092:29092"
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
@@ -100,23 +102,29 @@ services:
       - vineyard-network
 
   flink-jobmanager:
-    image: flink:2.2.0-scala_2.12-java11
+    # image: flink:2.2.0-scala_2.12-java11
+    image: apache/flink:1.18-scala_2.12
     ports:
       - "8081:8081"
     command: jobmanager
     environment:
       - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
+    volumes:
+      - ./jars/flink-sql-connector-kafka-3.0.1-1.18.jar:/opt/flink/lib/flink-sql-connector-kafka-3.0.1-1.18.jar
     networks:
       - vineyard-network
 
   flink-taskmanager:
-    image: flink:2.2.0-scala_2.12-java11
+    # image: flink:2.2.0-scala_2.12-java11
+    image: apache/flink:1.18-scala_2.12
     command: taskmanager
     environment:
       - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
       - TASK_MANAGER_NUMBER_OF_TASK_SLOTS=2
     depends_on:
       - flink-jobmanager
+    volumes:
+      - ./jars/flink-sql-connector-kafka-3.0.1-1.18.jar:/opt/flink/lib/flink-sql-connector-kafka-3.0.1-1.18.jar
     networks:
       - vineyard-network
 
