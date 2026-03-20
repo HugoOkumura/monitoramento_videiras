@@ -7,7 +7,7 @@
 #define SENSORID 1
 
 #define DHT_PIN 23
-#define MSG_SIZE 50
+#define MSG_SIZE 100
 #define READING_BUFFER_SIZE 10
 
 typedef struct{

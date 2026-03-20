@@ -6,16 +6,16 @@ services:
       - "1883:1883"
       - "9001:9001"
     volumes:
-      - ./mosquitto/config/mosquitto.conf:/mosquitto/config/mosquitto.conf
-      - ./mosquitto/data:/mosquitto/data
-      - ./mosquitto/log:/mosquitto/log
+      - ./mosquitto/config/:/mosquitto/config/
+      - ./mosquitto/data:/mosquitto/data/
+      - ./mosquitto/log:/mosquitto/log/
     networks:
       - vineyard-network
 
   ingestor:
-    build: 
-      context: .
-      dockerfile: ./ingestor/Dockerfile
+    build: ingestor
+      # context: .
+      # dockerfile: ./ingestor/Dockerfile
     container_name: data_ingestor
     depends_on:
       - mosquitto
@@ -28,15 +28,15 @@ services:
       - KAFKA_TOPIC=uva_mesa_vitoria
     restart: always
     volumes:
-      - .:/usr/src/app/
-      - ./ingestor/log/log.log:/usr/src/app/log/log.log
+      - ./models:/usr/src/app/models
+      - ./ingestor/log/:/usr/src/app/log/
     networks:
       - vineyard-network
 
   preprocessor:
-    build: 
-      context: .
-      dockerfile: ./pre_processor/Dockerfile
+    build: pre_processor
+      # context: .
+      # dockerfile: ./pre_processor/Dockerfile
     container_name: pre_processor
     environment:
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
@@ -57,7 +57,7 @@ services:
       - influxdb
       - postgres
     volumes:
-      - .:/usr/src/app/
+      - ./models:/usr/src/app/models
       - ./pre_processor/log/log.log:/usr/src/app/log/log.log
     networks:
       - vineyard-network

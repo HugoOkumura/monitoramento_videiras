@@ -68,7 +68,6 @@ class DataIngestor:
     def _on_connect(self, client, userdata, flags, reason_code, properties):
         self.client.subscribe(self._MQTT_TOPIC)
         logging.info(f"Subscribed to topic {self._MQTT_TOPIC}")
-    #end _on_connect
 
     '''
         -   Callback de consumo de mensage do MQTT.
