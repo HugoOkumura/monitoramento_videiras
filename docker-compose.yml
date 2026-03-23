@@ -52,12 +52,17 @@ services:
       - POSTGRES_PASSWORD=admin
       - AGREGAR_MINUTOS=15
     depends_on:
-      - kafka
-      - flink-jobmanager
-      - influxdb
-      - postgres
+      # kafka-setup:
+      #   condition: service_completed_successfully
+      flink-jobmanager:
+        condition: service_healthy
+      influxdb:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      
+      # - postgres
     volumes:
-      - ./jars/flink-sql-connector-kafka-3.0.1-1.18.jar:/opt/flink/lib/flink-sql-connector-kafka-3.0.1-1.18.jar
       - ./models:/usr/src/app/models
       - ./pre_processor/log/log.log:/usr/src/app/log/log.log
     networks:
@@ -89,45 +94,50 @@ services:
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_CREATE_TOPICS: "uva_mesa_vitoria:1:1"
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
-      KAFKA_JMX_PORT: 9101
-      KAFKA_JMX_HOSTNAME: localhost
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - vineyard-network
 
-  flink-jobmanager:
+  # Needs healthcheck
+  flink-jobmanager: 
     # image: flink:2.2.0-scala_2.12-java11
-    image: apache/flink:1.18-scala_2.12
+    # image: apache/flink:1.18-scala_2.12
+    build: ./flink
     ports:
       - "8081:8081"
-    command: jobmanager
+    command: 
+      - jobmanager
     environment:
       - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
-    volumes:
-      - ./jars/flink-sql-connector-kafka-3.0.1-1.18.jar:/opt/flink/lib/flink-sql-connector-kafka-3.0.1-1.18.jar
     networks:
       - vineyard-network
 
   flink-taskmanager:
     # image: flink:2.2.0-scala_2.12-java11
-    image: apache/flink:1.18-scala_2.12
-    command: taskmanager
+    # image: apache/flink:1.18-scala_2.12
+    build: ./flink
+    command: 
+      - taskmanager
     environment:
       - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
       - TASK_MANAGER_NUMBER_OF_TASK_SLOTS=2
     depends_on:
       - flink-jobmanager
-    volumes:
-      - ./jars/flink-sql-connector-kafka-3.0.1-1.18.jar:/opt/flink/lib/flink-sql-connector-kafka-3.0.1-1.18.jar
     networks:
       - vineyard-network
 
+  # Needs healthcheck
   influxdb:
     image: influxdb:3-core
     ports:

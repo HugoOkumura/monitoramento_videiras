@@ -12,3 +12,5 @@ mosquitto/
 tests/
 **/log/**
 grafana/
+__pycache__
+share
