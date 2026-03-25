@@ -19,7 +19,7 @@ services:
     container_name: data_ingestor
     depends_on:
       - mosquitto
-      - kafka
+      - kafka-init
     environment:
       - MQTT_BROKER=mosquitto
       - MQTT_PORT=1883
@@ -100,12 +100,25 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_CREATE_TOPICS: "uva_mesa_vitoria:1:1"
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      # KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      # command:
+      #   -bash -c docker exec broker sh -c
+      #   -sleep 10
+      #   -kafka-topics --boostrap-server kafka:29092 --create --topic uva_mesa_vitoria --replication-factor 1 --partition1 1
     healthcheck:
       test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - vineyard-network
+
+  kafka-init:
+    image: confluentinc/cp-kafka:7.5.0
+    depends_on:
+      - kafka
+    command: sh -c "sleep 15 && kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic uva_mesa_vitoria --partitions 1 --replication-factor 1"
+    init: true
     networks:
       - vineyard-network
 
@@ -154,6 +167,12 @@ services:
       - INFLUXDB_INIT_ORG=vinhedo
       - INFLUXDB_INIT_BUCKET=sensor_data
       - INFLUXDB_INIT_ADMIN_TOKEN=token
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://influxdb:8086/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
     volumes:
       - influxdb-data:/var/lib/influxdb3
     networks:
@@ -167,6 +186,12 @@ services:
       - POSTGRES_USER=admin
       - POSTGRES_PASSWORD=admin
       - POSTGRES_DB=leituras_vinhedo
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d leituras_vinhedo"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
     networks:
       - vineyard-network
     volumes:
