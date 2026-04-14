@@ -7,7 +7,7 @@
 #define SENSORID 1
 
 #define DHT_PIN 23
-#define MSG_SIZE 100
+#define MSG_SIZE 200
 #define READING_BUFFER_SIZE 10
 
 typedef struct{
@@ -121,13 +121,15 @@ void sendMSG(){
 
   String payload = "{";
   payload += "\"sensor_id\":" + String(SENSORID) + ",";
-  payload += "\"temperatura\":" + String(tempMed) + ",";
-  payload += "\"umidade\":" + String(humMed);
+  payload += "\"temperature\":" + String(tempMed) + ",";
+  payload += "\"air_humidity\":" + String(humMed);
   payload += "}";
 
   payload.toCharArray(msg, MSG_SIZE);
 
-  Serial.println("Publishing...");
+  Serial.print("Publishing: ");
+  Serial.print(payload);
+  Serial.println("...");
   client.publish(topic, msg);
     
 }
