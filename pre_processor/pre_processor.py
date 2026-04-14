@@ -1,15 +1,19 @@
 from pyflink.datastream import StreamExecutionEnvironment
-from pyflink.datastream.functions import MapFunction, AllWindowFunction, AggregateFunction
-from pyflink.datastream.connectors.kafka import KafkaSource, KafkaSink, FlinkKafkaConsumer
+from pyflink.datastream.functions import MapFunction, AggregateFunction
+from pyflink.datastream.connectors.kafka import KafkaSource, KafkaOffsetsInitializer
 from pyflink.common.serialization import SimpleStringSchema
-from pyflink.common import WatermarkStrategy, Time
-from pyflink.datastream.window import TumblingEventTimeWindows
+from pyflink.common.restart_strategy import RestartStrategies
+from pyflink.common import WatermarkStrategy, Time, Duration
+from pyflink.common.watermark_strategy import TimestampAssigner
+from pyflink.datastream.window import TumblingEventTimeWindows, TumblingProcessingTimeWindows
 import json
 import logging
 from datetime import datetime
-from influxdb_client import InfluxDBClient, Point
-from influxdb_client.client.write_api import SYNCHRONOUS
-import os 
+from influxdb_client_3 import Point, InfluxDBClient3
+import os
+import time
+import dotenv
+import sys
 
 def startLog():
     logging.basicConfig(
@@ -17,25 +21,30 @@ def startLog():
         format="{asctime} - {levelname} - {message}",
         datefmt="%d-%m-%Y %H:%M",
         style="{",
-        filename="./log/log.log",
-        encoding="utf-8",
-        filemode="a"
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler(filename="./log/log.log", mode="a", encoding="utf-8")
+        ]
     )
-
+'''
+Class de map para extrair os dados recebidos pelo Kafka
+'''
 class ProcessSensorData(MapFunction):
     def map(self, data):
         sensor_data = json.loads(data)
-
         results = {
             'sensor_id': sensor_data['sensor_id'],
             'timestamp': sensor_data['timestamp'],
             'temperature': sensor_data['temperature'],
-            'humidity': sensor_data['humidity'],
-            'soil_moisture': sensor_data['soil_moisture']
+            'air_humidity': sensor_data['air_humidity'],
+            'variety' : sensor_data['variety']
+            # 'soil_moisture': sensor_data['soil_moisture']
         }
 
         results['water_stress'] = self.calculate_water_stress(sensor_data)
         results['disease_risk'] = self.calculate_disease_risk(sensor_data)
+
+        logging.info(f"Recebido do Kafka: {results}")
 
         return results
 
@@ -45,182 +54,226 @@ class ProcessSensorData(MapFunction):
     def calculate_disease_risk(self,data):
         return 0
 
+
+'''
+Classe de agregação e processamento dos dados recebidos por sensor
+'''
+class SensorAggregate(AggregateFunction):
+
+    def create_accumulator(self):
+        # min_temp, max_temp, sum_temp, sum_air_humidity, sum_ws, sum_dr, count, sensor_id
+        return (float('inf'), float('-inf'), 0.0, 0.0, 0.0, 0.0, 0, None)
+
+    def add(self, value, acc):
+        min_t, max_t, sum_t, sum_ah, sum_ws, sum_dr, count, sensor_id = acc
+
+        temp = value['temperature']
+        air_humidity = value['air_humidity']
+        ws = value['water_stress']
+        dr = value['disease_risk']
+
+        return (
+            min(min_t, temp),
+            max(max_t, temp),
+            sum_t + temp,
+            sum_ah + air_humidity,
+            sum_ws + ws,
+            sum_dr + dr,
+            count + 1,
+            value['sensor_id']
+        )
+
+    def get_result(self, acc):
+        min_t, max_t, sum_t, sum_ah, sum_ws, sum_dr, count, sensor_id = acc
+
+        return {
+            'type': 'sensor',
+            'sensor_id': sensor_id,
+            'min_temp': min_t,
+            'max_temp': max_t,
+            'avg_temp': sum_t / count if count else 0,
+            'avg_air_humidity': sum_ah / count if count else 0,
+            'avg_water_stress': sum_ws / count if count else 0,
+            'avg_disease_risk': sum_dr / count if count else 0,
+            'timestamp': int(datetime.now().timestamp())
+        }
+
+    def merge(self, a, b):
+
+        return (
+            min(a[0], b[0]),
+            max(a[1], b[1]),
+            a[2] + b[2],
+            a[3] + b[3],
+            a[4] + b[4],
+            a[5] + b[5],
+            a[6] + b[6],
+            a[7] or b[7]
+        )
+
+'''
+Agregação e processamento dos dados do campo inteiro
+'''
+class FieldAggregate(AggregateFunction):
+
+    def create_accumulator(self):
+        return (0.0, 0.0, 0.0, 0.0, 0)
+        # sum_temp, sum_air_humidity, sum_water_stress, sum_disease_risk, count
+
+    def add(self, value, acc):
+        st, sh, sw, sd, c = acc
+        return (
+            st + value['temperature'],
+            sh + value['air_humidity'],
+            sw + value['water_stress'],
+            sd + value['disease_risk'],
+            c + 1
+        )
+
+    def get_result(self, acc):
+        st, sh, sw, sd, c = acc
+        return {
+            'type': 'field',
+            'avg_temperature': st / c if c else 0,
+            'avg_air_humidity': sh / c if c else 0,
+            'avg_water_stress': sw / c if c else 0,
+            'avg_disease_risk': sd / c if c else 0,
+            'active_sensors': c,
+            'timestamp': int(datetime.now().timestamp())
+        }
+
+    def merge(self, a, b):
+        return (
+            a[0] + b[0],
+            a[1] + b[1],
+            a[2] + b[2],
+            a[3] + b[3],
+            a[4] + b[4]
+        )
+
+
+'''
+Classe para fazer a gravação no InfluxDB
+'''
 class SaveToInfluxDB(MapFunction):
 
-    def __init__(self, influx_config):
-        self.influx_config = influx_config
+    def __init__(self, config):
+        config = dict(config)
+        self.host = config.pop('url')
+        self.token = config.pop('token')
+        self.database = config.pop('database')
+        self.config = config
         self.client = None
-        self.write_api = None
 
     def open(self, runtime_context):
-        self.client = InfluxDBClient(**self.influx_config)
-        self.write_api = self.client.write_api(write_options=SYNCHRONOUS)
+        logging.info("Tentando conectar com InfluxDB")
+        try:    
+            self.client = InfluxDBClient3(host=self.host, database=self.database, token=self.token, **self.config)
+        except Exception as e:
+            logging.error(f"SaveToInflux.open: Não foi possível conectar ao InfluxDB. {e}")
 
     def map(self, data):
-        if 'sensor_id' in data:
-            point = Point("sensor_data") \
-                .tag("sensor_id", data['sensor_id']) \
-                .field("temperature", data['temperature']) \
-                .field("humidity", data['humidity']) \
-                .field("soil_moisture", data['soil_moisture']) \
-                .field("water_stress", data['water_stress']) \
-                .field("disease_risk", data['disease_risk']) \
-                .time(data['timestamp'])
-        else:
-            point = Point("field_aggregate") \
-                .field("avg_temperature", data['avg_temperature']) \
-                .field("max_temperature", data['max_temperature']) \
-                .field("min_temperature", data['min_temperature']) \
-                .field("avg_water_stress", data['avg_water_stress']) \
-                .field("avg_disease_risk", data['avg_disease_risk']) \
-                .field("active_sensors", data['active_sensors']) \
-                .time(data['timestamp'])
+        try:
+            if data['type'] == 'sensor':
+                point = Point("sensor_stats") \
+                    .tag("sensor_id", data['sensor_id']) \
+                    .field("min_temp", data['min_temp']) \
+                    .field("max_temp", data['max_temp']) \
+                    .field("avg_temp", data['avg_temp']) \
+                    .time(data['timestamp'], write_precision="s")
 
-        self.write_api.write(
-            bucket=self.influx_config['bucket'],
-            org=self.influx_config['org'],
-            record=point
-        )
+            else:
+                point = Point("field_aggregate") \
+                    .field("avg_temperature", data['avg_temperature']) \
+                    .field("avg_air_humidity", data['avg_air_humidity']) \
+                    .field("avg_water_stress", data['avg_water_stress']) \
+                    .field("avg_disease_risk", data['avg_disease_risk']) \
+                    .field("active_sensors", data['active_sensors']) \
+                    .time(data['timestamp'], write_precision="s")
 
-        return data  # mantém o fluxo
+            self.client.write(point)
+            logging.info("Salvo no InfluxDB")
+        except Exception as e:
+            logging.error(f"SaveToInfluxDB: Erro ao gravar no Influxdb. {e}")
+        return data
 
-    def close(self):
-        if self.client:
-            self.client.close()
 
-class AgregateSensorData(AggregateFunction):
-    def create_accumulator(self):
-         # (sum_temperature, sum_humidity, sum_max_temp, sum_min_temp, count)
-        return (0.0, 0.0, 0.0, 0.0, 0) 
-    
-    def add(self, value: dict, accumulator: tuple):
-        total_temp, total_humidity, total_max_temp, total_min_temp, count = accumulator
-        return (
-            total_temp + value['temperature'],
-            total_humidity + value['humidity'],
-            total_max_temp + value['max_temp'],
-            total_min_temp + value['min_temp'],
-            count + 1
-        )
-    
-    def get_result(self, accumulator: tuple) -> dict:
-        total_temp, total_humidity, count = accumulator
-        
-        if count == 0:
-            return {
-                'avg_temperature': 0.0,
-                'avg_humidity': 0.0,
-                'total_records': 0
-            }
-        
-        return {
-            'avg_temperature': total_temp / count,
-            'avg_humidity': total_humidity / count,
-            'total_records': count
-        }
-    
-    def merge(self, acc_a: tuple, acc_b: tuple) -> tuple:
-        total_temp_a, total_humidity_a, total_max_temp_a, total_min_temp_a, count_a = acc_a
-        total_temp_b, total_humidity_b, total_max_temp_b, total_min_temp_b, count_b = acc_b
-        
-        return (
-            total_temp_a + total_temp_b,
-            total_humidity_a + total_humidity_b,
-            total_max_temp_a + total_max_temp_b, 
-            total_min_temp_a + total_min_temp_b,
-            count_a + count_b
-        )
-
+'''
+Class mestre que faz a conexão com o Kafka e executa os jobs do Flink
+'''
 class VineyardDataProcessor:
 
-    def __init__(self):
-        self.KAFKA_BOOTSTRAP_SERVERS  = os.getenv('KAFKA_BOOTSTRAP_SERVERS')
-        self.KAFKA_TOPIC = os.getenv('KAFKA_TOPIC') 
-        
-        self.flink_env = StreamExecutionEnvironment.get_execution_environment()
-        self.flink_env.add_jars("file:///opt/flink/lib/flink-sql-connector-kafka-3.1.0-1.18.jar")
+    def __init__(self, influx_token):
+        self.env = StreamExecutionEnvironment.get_execution_environment()
 
-        self.kafka_source = KafkaSource.builder() \
-            .set_bootstrap_servers(self.KAFKA_BOOTSTRAP_SERVERS) \
-            .set_topics(self.KAFKA_TOPIC) \
+        self.env.set_restart_strategy(
+            RestartStrategies.fixed_delay_restart(5, 1000)
+        )
+        self.env.add_jars("file:///opt/flink/lib/flink-sql-connector-kafka-3.1.0-1.18.jar")
+
+        kafka_source = KafkaSource.builder() \
+            .set_bootstrap_servers(os.getenv('KAFKA_BOOTSTRAP_SERVERS')) \
+            .set_topics(os.getenv('KAFKA_TOPIC')) \
             .set_group_id(os.getenv('KAFKA_GROUP_ID')) \
             .set_value_only_deserializer(SimpleStringSchema()) \
             .build()
-        
-        self.stream = self.flink_env.from_source(
-            self.kafka_source,
+            # .set_starting_offsets(KafkaOffsetsInitializer.earliest()) \
+
+        self.stream = self.env.from_source(
+            kafka_source,
             WatermarkStrategy.no_watermarks(),
             "Kafka Source"
         )
 
         self.influx_config = {
             "url": os.getenv('INFLUXDB_URL'),
-            "token": os.getenv('INFLUXDB_TOKEN'),
-            "org": os.getenv('INFLUXDB_ORG'),
-            "bucket": os.getenv('INFLUXDB_BUCKET')
+            "token": influx_token,
+            "database": os.getenv('INFLUXDB_DB'),
+            "verify_ssl": False
         }
-
-        self.postgres_config = {
-            "host": os.getenv('POSTGRES_HOST'),
-            "port": os.getenv('POSTGRES_PORT'),
-            "database": os.getenv('POSTGRES_DB'),
-            "user": os.getenv('POSTGRES_USER'),
-            "password": os.getenv('POSTGRES_PASSWORD')
-        }
-    
-    def aggregate_field_data(self,sensor_results):
-        if not sensor_results:
-            return None
-        
-        temps = [r['temperature'] for r in sensor_results]
-
-        return{
-            'timestamp': datetime.now().isoformat(),
-            'avg_temperature': sum(temps) / len(temps),
-            'max_temperature': max(temps),
-            'min_temperature': min(temps),
-            'avg_water_stress': sum(r['water_stress'] for r in sensor_results) / len(sensor_results),
-            'avg_disease_risk': sum(r['disease_risk'] for r in sensor_results) / len(sensor_results),
-            'active_sensors': len(sensor_results)
-        }
-    
-    def save_to_postgres(self, data):
-        pass
 
     def run(self):
-        
-        # processamento individual por sensor
-        sensor_stream = self.stream \
-            .map(ProcessSensorData()) \
-            .key_by(lambda x: x['sensor_id'])
-        
-        # Calcular estatísticas por sensor em janelas de 1 minuto
-        sensor_stats = sensor_stream \
-            .window(TumblingEventTimeWindows.of(Time.minutes(1))) \
-            .reduce(lambda a, b: {
-                'sensor_id': a['sensor_id'],
-                'min_temp': min(a['temperature'], b['temperature']),
-                'max_temp': max(a['temperature'], b['temperature']),
-                'avg_temp': (a['temperature'] + b['temperature']) / 2,
-                'avg_water_stress': (a['water_stress'] + b['water_stress']) / 2
-            })
-        
+
+        parsed = self.stream.map(ProcessSensorData())
+
+        parsed = parsed.assign_timestamps_and_watermarks(
+            WatermarkStrategy
+                .for_bounded_out_of_orderness(Duration.of_seconds(15))
+                .with_idleness(Duration.of_seconds(15))
+                # .with_timestamp_assigner(SensorTimestampAssigner())
+        )
+
+        # -------- SENSOR --------
+        sensor_stats = parsed \
+            .key_by(lambda x: x['sensor_id']) \
+            .window(TumblingProcessingTimeWindows.of(Time.seconds(10))) \
+            .aggregate(SensorAggregate())
+
         sensor_stats.map(SaveToInfluxDB(self.influx_config))
-        # self.stream.map(lambda x: self.save_to_postgres(x))
 
-        field_aggregate = self.stream \
-            .window_all(TumblingEventTimeWindows.of(Time.minutes(5))) \
-            .aggregate(aggregate_function=AgregateSensorData())
+        # -------- FIELD --------
+        field_stats = parsed \
+            .window_all(TumblingProcessingTimeWindows.of(Time.seconds(30))) \
+            .aggregate(FieldAggregate())
 
-        field_aggregate.map(SaveToInfluxDB(self.influx_config))
+        field_stats.map(SaveToInfluxDB(self.influx_config))
 
-        self.flink_env.execute("Vineyard Data Processing Job")
+        self.env.execute("Vineyard Processing")
 
+# ---------------- ENTRY ----------------
 if __name__ == "__main__":
     startLog()
+    dotenv.load_dotenv("./.env")
     
-    # while True:
-    #     pass
+    influxdb_token = None
 
-    processor = VineyardDataProcessor()
+    logging.info("Esperando inserir token do InfluxDB3 no arquivo .env...")
+    while influxdb_token is None:
+        influxdb_token = os.getenv("INFLUXDB_TOKEN")
+        if influxdb_token is None:
+            logging.warning("Insira uma token no arquivo .env...")
+        time.sleep(10)
+        
+    logging.info("Token carregado! Iniciando o pré-processador.")
+    processor = VineyardDataProcessor(influxdb_token)
     processor.run()
