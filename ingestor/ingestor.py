@@ -5,12 +5,13 @@ import time
 import queue
 import logging
 import os
+import sys
 from datetime import datetime
 from jsonschema import validate
 from jsonschema.exceptions import ValidationError
 from confluent_kafka import Producer
 
-from models.models import MQTT_DATA
+from models.models import MQTT_DATA, VALUE_RANGES
 
 def startLog():
     logging.basicConfig(
@@ -18,9 +19,10 @@ def startLog():
         format="{asctime} - {levelname} - {message}",
         datefmt="%d-%m-%Y %H:%M",
         style="{",
-        filename="./log/log.log",
-        encoding="utf-8",
-        filemode="a"
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler(filename="./log/log.log", mode="a", encoding="utf-8")
+        ]
     )
 
 class DataIngestor:
@@ -35,15 +37,14 @@ class DataIngestor:
         self.client.on_message = self._on_message
 
         # Kafka producer config
-        self.KAFKA_BOOTSRAP_SERVERS  = os.getenv('KAFKA_BOOTSRAP_SERVERS')
+        self.KAFKA_BOOTSTRAP_SERVERS  = os.getenv('KAFKA_BOOTSTRAP_SERVERS')
         self.KAFKA_TOPIC = os.getenv('KAFKA_TOPIC')
         self.kafka_producer = Producer({
-            "bootstrap.servers" : self.KAFKA_BOOTSRAP_SERVERS,
+            "bootstrap.servers" : self.KAFKA_BOOTSTRAP_SERVERS,
             "client.id": "uva_vitoria_producer"
         })
 
         self.producer_queue = queue.Queue(maxsize=50)
-    #end __init__
 
     '''
     Inicialização de classe.
@@ -60,7 +61,6 @@ class DataIngestor:
 
         except Exception as e:
             logging.error(f"run: {e}")
-    #end run
 
     '''
     Callback de conexão do MQTT.
@@ -70,7 +70,7 @@ class DataIngestor:
         logging.info(f"Subscribed to topic {self._MQTT_TOPIC}")
 
     '''
-        -   Callback de consumo de mensage do MQTT.
+    -   Callback de consumo de mensage do MQTT.
         Ao receber uma mensagem no tópico especificado nas variáveis de ambiente
     valida o formato dos dados, filtra os dados fora de um certo range, adiciona
     metadados e armazena numa fila para o produtor do kafka.
@@ -79,19 +79,21 @@ class DataIngestor:
         try:
             data = json.loads(msg.payload.decode())
 
-            # data format validation
+            # Validação do formato dos dados
             validate(data, schema=MQTT_DATA)
-            # data outliers verification
-            if not self.verify_outliers(data):
-                raise f"Data out of range"
 
-            # data enrichment
+            # data outliers verification
+            data = self.null_outliers(data)
+
+            # Adiciona metadados 
             enriched_data = {
                 **data,
-                "variedade": "vitória",
-                "ingestion_timestamp": datetime.now().timestamp(),
-                "protocol": client.protocol,
-                "qos": msg.qos
+                "timestamp": datetime.now().timestamp(),
+                "variety": "vitória",
+                "ingestion_metadata": {
+                    "protocol": client.protocol,
+                    "qos": msg.qos
+                }
             }
 
             if self.producer_queue.full():
@@ -108,24 +110,37 @@ class DataIngestor:
         except BaseException as e:
             logging.error(f"_on_message: {e}:\n{msg.payload.decode()}")
 
+
     def _producer_send_report(self, err, msg):
         if err is not None:
             logging.error(f"_producer_send_report: Erro ao enviar mensagem para o Kafka: {err}")
         else:
             logging.info(f"Mensagem enviada para o Kafka")
 
-    def _mqtt_consumer(self):
-        try:
-            self.client.connect(self._BROKER, int(self._PORT))
-            logging.info(f"Connect to Broker!")
-            self.client.loop_forever()
-        
-        except Exception as e:
-            logging.error(f"MQTT_CONSUMER: {e}")
 
+    '''
+    - Thread que irá permanecer em loop para a conexão com o MQTT broker.
+    '''
+    def _mqtt_consumer(self):
+        connected = False
+        while not connected:
+            try:
+                self.client.connect(self._BROKER, int(self._PORT))
+
+                connected = True
+            except Exception as e:
+                logging.error(f"MQTT_CONSUMER: {e}")
+                time.sleep(5)
+
+        logging.info(f"Connected to Broker!")
+        self.client.loop_forever()
+
+    '''
+    Thread que irá enviar os dados consumidos pelo MQTT para o kafka 
+    '''
     def _kafka_producer(self):
-        try:
-            while(True):
+        while(True):
+            try:
                 data = self.producer_queue.get(block=True)
                 if data:
                     message = json.dumps(data)
@@ -136,20 +151,26 @@ class DataIngestor:
                         callback= self._producer_send_report
                     )
 
-        except Exception as e:
-            logging.error(f"Kafka_producer: {e}")
-            time.sleep(3)
-        finally:
-            self.producer_queue.task_done()
+                    logging.info(f"Kafka_producer: Enviou uma leitura para o Kafka com sucesso")
 
-    
-    def verify_outliers(self, data):
-        if float(data["temperatura"]) not in range(-10,50):
-            return False
-        if float(data["umidade"]) not in range(0,100):
-            return False      
-        return True
-    
+            except Exception as e:
+                logging.error(f"Kafka_producer: {e}")
+                time.sleep(3)
+            finally:
+                self.producer_queue.task_done()
+                self.kafka_producer.flush()
+
+    '''
+    - Método que verifica os outliers e anula-os quando encontrado
+    '''
+    def null_outliers(data:dict):
+        for key in list(data.keys()):
+            if key == "sensor_id":
+                continue
+            if data[key] not in range(VALUE_RANGES[key][0], VALUE_RANGES[key][1]):
+                data[key] = None
+
+        return data
 
 if __name__ == "__main__":
     os.makedirs("./log", exist_ok=True)
