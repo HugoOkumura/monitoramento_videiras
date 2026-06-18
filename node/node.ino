@@ -8,7 +8,7 @@
 
 #define DHT_PIN 23
 #define MSG_SIZE 200
-#define READING_BUFFER_SIZE 10
+#define READING_BUFFER_SIZE 100
 
 typedef struct{
   float temp;
@@ -20,7 +20,7 @@ PubSubClient client(espClient);
 
 // timers
 hw_timer_t *readingTimer = NULL;
-const int readTimerOut = 5000; // time in miliseconds 
+const int readTimerOut = 1000; // time in miliseconds 
 
 hw_timer_t *sendingTimer = NULL;
 const int sendTimerOut = 16000;
@@ -78,7 +78,7 @@ void initWifi(){
   Serial.println(WiFi.localIP());
 }
 
-void reconnect(){
+void reconnect_mqtt(){
   endTimers();      
   while(!client.connected()){
     Serial.println("Connecting to MQTT Server...");
@@ -102,12 +102,14 @@ void readDHT11(){
   if(result == 0){
     readingData data = {temp, hum};
     readings[count] = data;
+    count++;
   }
 
-  count++;
 }
 
 void sendMSG(){
+  if (count == 0) return;
+
   int tempSum = 0;
   int humSum = 0;
 
@@ -131,7 +133,8 @@ void sendMSG(){
   Serial.print(payload);
   Serial.println("...");
   client.publish(topic, msg);
-    
+  
+  count = 0;
 }
 
 void callback(void* topic, byte* payload, unsigned int length){
@@ -146,6 +149,8 @@ void setup() {
   delay(2000);
   Serial.begin(115200);
   initWifi();
+  Serial.println(gtip);
+  Serial.println(port);
 
   client.setServer(gtip,port);
   client.setCallback(callback);
@@ -154,8 +159,13 @@ void setup() {
 
 void loop() {
 
+  if(WiFi.status() != WL_CONNECTED){
+    Serial.println("WiFi disconnected. Reconnecting...");
+    WiFi.reconnect();
+  }
+
   if(!client.connected()){
-    reconnect();
+    reconnect_mqtt();
   }
 
   client.loop();
